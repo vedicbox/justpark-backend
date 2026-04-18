@@ -1,0 +1,8 @@
+# Exclude build artifacts, local environment, and frontend source from backend image builds
+node_modules
+dist
+.env
+*.log
+frontend
+.git
+coverage

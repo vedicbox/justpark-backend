@@ -1,0 +1,954 @@
+// ─────────────────────────────────────────────────────────────
+// JustPark — Prisma Schema
+// Database: PostgreSQL 16 + PostGIS 3.4
+//
+// NOTE: The `location` field on ParkingSpace uses PostGIS
+// geography type (Unsupported). All spatial queries use raw SQL.
+// The booking exclusion constraint is applied via raw migration SQL.
+// ─────────────────────────────────────────────────────────────
+
+generator client {
+  provider        = "prisma-client-js"
+  previewFeatures = ["postgresqlExtensions"]
+  binaryTargets   = ["native", "debian-openssl-3.0.x"]
+}
+
+datasource db {
+  provider   = "postgresql"
+  url        = env("DATABASE_URL")
+  extensions = [uuidOssp(map: "uuid-ossp"), pgTrgm(map: "pg_trgm")]
+}
+
+// ─────────────────────────────────────────────
+// ENUMS
+// ─────────────────────────────────────────────
+
+enum UserRole {
+  user
+  host
+  admin
+}
+
+enum UserStatus {
+  active
+  suspended
+  deactivated
+}
+
+enum OtpType {
+  email_verify
+  phone_verify
+  password_reset
+}
+
+enum SocialProvider {
+  google
+  apple
+}
+
+enum KycDocumentType {
+  id_card
+  passport
+  driving_license
+  business_registration
+}
+
+enum KycStatus {
+  pending
+  approved
+  rejected
+}
+
+enum VehicleType {
+  car
+  bike
+  ev
+  truck
+  van
+}
+
+enum SpaceType {
+  open_air
+  covered
+  garage
+  indoor
+  underground
+}
+
+enum SpaceStatus {
+  draft
+  pending_review
+  active
+  paused
+  rejected
+  deleted
+}
+
+enum CancellationPolicy {
+  flexible
+  moderate
+  strict
+}
+
+enum Amenity {
+  cctv
+  ev_charging
+  access_24x7           @map("24x7_access")
+  gated
+  covered
+  security_guard
+  lighting
+  wheelchair_accessible
+  ev_type1
+  ev_type2
+  ev_ccs
+  ev_chademo
+}
+
+enum RateType {
+  hourly
+  daily
+  monthly
+}
+
+enum BookingStatus {
+  pending
+  confirmed
+  active
+  completed
+  cancelled
+  no_show
+  disputed
+}
+
+enum CancelledBy {
+  user
+  host
+  admin
+}
+
+enum PaymentMethod {
+  card
+  upi
+  net_banking
+  wallet
+  wallet_card_split
+}
+
+enum TransactionStatus {
+  pending
+  processing
+  completed
+  failed
+  refunded
+  partially_refunded
+}
+
+enum PaymentGateway {
+  stripe
+  razorpay
+}
+
+enum RefundStatus {
+  pending
+  processing
+  completed
+  failed
+}
+
+enum RefundTo {
+  original_method
+  wallet
+}
+
+enum WalletTransactionType {
+  top_up
+  payment
+  refund
+  cashback
+  admin_credit
+  admin_debit
+  withdrawal
+}
+
+enum ReviewStatus {
+  active
+  flagged
+  removed
+}
+
+enum DiscountType {
+  percentage
+  flat
+}
+
+enum EarningStatus {
+  pending
+  available
+  paid_out
+  on_hold
+}
+
+enum PayoutStatus {
+  requested
+  processing
+  completed
+  failed
+}
+
+enum TicketStatus {
+  open
+  in_progress
+  resolved
+  closed
+}
+
+enum TicketPriority {
+  low
+  medium
+  high
+  urgent
+}
+
+enum ResolutionType {
+  refund
+  partial_refund
+  no_action
+  credit
+}
+
+// ─────────────────────────────────────────────
+// MODELS — Users & Auth
+// ─────────────────────────────────────────────
+
+model User {
+  id             String     @id @default(dbgenerated("uuid_generate_v4()")) @db.Uuid
+  email          String     @unique @db.VarChar(255)
+  phone          String?    @unique @db.VarChar(20)
+  password_hash  String?    @db.VarChar(255)
+  first_name     String     @db.VarChar(100)
+  last_name      String     @db.VarChar(100)
+  role           UserRole   @default(user)
+  avatar_url     String?    @db.VarChar(500)
+  email_verified Boolean    @default(false)
+  phone_verified Boolean    @default(false)
+  status         UserStatus @default(active)
+  created_at     DateTime   @default(now()) @db.Timestamptz
+  updated_at     DateTime   @updatedAt @db.Timestamptz
+
+  // Auth relations
+  sessions               Session[]
+  otp_tokens             OtpToken[]
+  social_auth_providers  SocialAuthProvider[]
+
+  // KYC
+  kyc_documents  KycDocument[] @relation("KycSubmittedBy")
+  kyc_reviewed   KycDocument[] @relation("KycReviewedBy")
+
+  // Vehicles & Spaces
+  vehicles        Vehicle[]
+  parking_spaces  ParkingSpace[]
+
+  // Bookings & Payments
+  bookings               Booking[]
+  booking_locks          BookingLock[]
+  transactions           Transaction[]
+  saved_payment_methods  SavedPaymentMethod[]
+  wallet                 Wallet?
+
+  // Notifications
+  notifications             Notification[]
+  notification_preferences  NotificationPreference[]
+
+  // Reviews (as reviewer and as reviewee/host)
+  reviews_given     Review[] @relation("ReviewGiven")
+  reviews_received  Review[] @relation("ReviewReceived")
+
+  // Host financials
+  host_earnings  HostEarning[]
+  payouts        Payout[]
+  bank_accounts  BankAccount[]
+
+  // Admin & Support
+  audit_logs        AuditLog[]
+  tickets_raised    SupportTicket[] @relation("TicketSubmittedBy")
+  tickets_assigned  SupportTicket[] @relation("TicketAssignedTo")
+  disputes_raised   Dispute[]       @relation("DisputeRaisedBy")
+  disputes_resolved Dispute[]       @relation("DisputeResolvedBy")
+
+  // Favorites
+  favorites Favorite[]
+
+  @@index([email])
+  @@index([phone])
+  @@index([role])
+  @@index([status])
+  @@map("users")
+}
+
+model Session {
+  id                 String   @id @default(dbgenerated("uuid_generate_v4()")) @db.Uuid
+  user_id            String   @db.Uuid
+  refresh_token_hash String   @db.VarChar(255)
+  device_info        Json?    @db.JsonB
+  ip_address         String?  @db.VarChar(45)
+  expires_at         DateTime @db.Timestamptz
+  created_at         DateTime @default(now()) @db.Timestamptz
+
+  user User @relation(fields: [user_id], references: [id], onDelete: Cascade)
+
+  @@index([user_id])
+  @@index([refresh_token_hash])
+  @@index([expires_at])
+  @@map("sessions")
+}
+
+model OtpToken {
+  id         String   @id @default(dbgenerated("uuid_generate_v4()")) @db.Uuid
+  user_id    String   @db.Uuid
+  otp_hash   String   @db.VarChar(255)
+  type       OtpType
+  expires_at DateTime @db.Timestamptz
+  used       Boolean  @default(false)
+  created_at DateTime @default(now()) @db.Timestamptz
+
+  user User @relation(fields: [user_id], references: [id], onDelete: Cascade)
+
+  @@index([user_id])
+  @@index([expires_at])
+  @@map("otp_tokens")
+}
+
+model SocialAuthProvider {
+  id               String         @id @default(dbgenerated("uuid_generate_v4()")) @db.Uuid
+  user_id          String         @db.Uuid
+  provider         SocialProvider
+  provider_user_id String         @db.VarChar(255)
+  created_at       DateTime       @default(now()) @db.Timestamptz
+
+  user User @relation(fields: [user_id], references: [id], onDelete: Cascade)
+
+  @@unique([provider, provider_user_id])
+  @@index([user_id])
+  @@map("social_auth_providers")
+}
+
+model KycDocument {
+  id            String          @id @default(dbgenerated("uuid_generate_v4()")) @db.Uuid
+  user_id       String          @db.Uuid
+  document_type KycDocumentType
+  document_url  String          @db.VarChar(500)
+  status        KycStatus       @default(pending)
+  admin_notes   String?         @db.Text
+  reviewed_by   String?         @db.Uuid
+  reviewed_at   DateTime?       @db.Timestamptz
+  created_at    DateTime        @default(now()) @db.Timestamptz
+
+  user     User  @relation("KycSubmittedBy", fields: [user_id], references: [id], onDelete: Cascade)
+  reviewer User? @relation("KycReviewedBy", fields: [reviewed_by], references: [id])
+
+  @@index([user_id])
+  @@index([status])
+  @@map("kyc_documents")
+}
+
+// ─────────────────────────────────────────────
+// MODELS — Vehicles
+// ─────────────────────────────────────────────
+
+model Vehicle {
+  id           String      @id @default(dbgenerated("uuid_generate_v4()")) @db.Uuid
+  user_id      String      @db.Uuid
+  plate_number String      @db.VarChar(20)
+  type         VehicleType
+  make         String?     @db.VarChar(100)
+  model        String?     @db.VarChar(100)
+  color        String?     @db.VarChar(50)
+  is_default   Boolean     @default(false)
+  created_at   DateTime    @default(now()) @db.Timestamptz
+
+  user     User      @relation(fields: [user_id], references: [id], onDelete: Cascade)
+  bookings Booking[]
+
+  @@index([user_id])
+  @@map("vehicles")
+}
+
+// ─────────────────────────────────────────────
+// MODELS — Parking Spaces (PostGIS)
+// ─────────────────────────────────────────────
+
+model ParkingSpace {
+  id                           String             @id @default(dbgenerated("uuid_generate_v4()")) @db.Uuid
+  host_id                      String             @db.Uuid
+  name                         String             @db.VarChar(200)
+  description                  String?            @db.Text
+  address_line1                String             @db.VarChar(255)
+  address_line2                String?            @db.VarChar(255)
+  city                         String             @db.VarChar(100)
+  state                        String             @db.VarChar(100)
+  postal_code                  String             @db.VarChar(20)
+  country                      String             @default("IN") @db.VarChar(2)
+  // PostGIS geography column — managed via raw SQL migration
+  // Use raw SQL queries for all spatial operations
+  // location geography(Point, 4326) — see migration SQL
+  location                     Unsupported("geography(Point, 4326)")?
+  geohash                      String?            @db.VarChar(12)
+  space_type                   SpaceType
+  total_capacity               Int
+  allowed_vehicles             String[]
+  status                       SpaceStatus        @default(draft)
+  cancellation_policy          CancellationPolicy @default(flexible)
+  min_booking_duration_minutes Int?
+  max_booking_duration_minutes Int?
+  buffer_minutes               Int                @default(0)
+  instant_book                 Boolean            @default(true)
+  created_at                   DateTime           @default(now()) @db.Timestamptz
+  updated_at                   DateTime           @updatedAt @db.Timestamptz
+
+  host           User               @relation(fields: [host_id], references: [id])
+  photos         SpacePhoto[]
+  amenities      SpaceAmenity[]
+  schedules      SpaceSchedule[]
+  blackout_dates SpaceBlackoutDate[]
+  pricing_rules  SpacePricingRule[]
+  slots          ParkingSlot[]
+  bookings       Booking[]
+  booking_locks  BookingLock[]
+  reviews        Review[]
+  favorites      Favorite[]
+
+  @@index([host_id])
+  @@index([status])
+  @@index([geohash])
+  @@index([city])
+  @@index([space_type])
+  // Spatial index created via raw SQL in migration:
+  // CREATE INDEX idx_spaces_location ON parking_spaces USING GIST(location);
+  @@map("parking_spaces")
+}
+
+model SpacePhoto {
+  id            String   @id @default(dbgenerated("uuid_generate_v4()")) @db.Uuid
+  space_id      String   @db.Uuid
+  url           String   @db.VarChar(500)
+  display_order Int      @default(0)
+  created_at    DateTime @default(now()) @db.Timestamptz
+
+  space ParkingSpace @relation(fields: [space_id], references: [id], onDelete: Cascade)
+
+  @@index([space_id])
+  @@map("space_photos")
+}
+
+model SpaceAmenity {
+  id       String  @id @default(dbgenerated("uuid_generate_v4()")) @db.Uuid
+  space_id String  @db.Uuid
+  amenity  Amenity
+
+  space ParkingSpace @relation(fields: [space_id], references: [id], onDelete: Cascade)
+
+  @@unique([space_id, amenity])
+  @@map("space_amenities")
+}
+
+model SpaceSchedule {
+  id          String  @id @default(dbgenerated("uuid_generate_v4()")) @db.Uuid
+  space_id    String  @db.Uuid
+  day_of_week Int     // 0 = Sunday, 1 = Monday, ..., 6 = Saturday
+  open_time   String  @db.VarChar(5)  // "HH:mm" format
+  close_time  String  @db.VarChar(5)  // "HH:mm" format
+  is_closed   Boolean @default(false)
+
+  space ParkingSpace @relation(fields: [space_id], references: [id], onDelete: Cascade)
+
+  @@unique([space_id, day_of_week])
+  @@map("space_schedules")
+}
+
+model SpaceBlackoutDate {
+  id       String   @id @default(dbgenerated("uuid_generate_v4()")) @db.Uuid
+  space_id String   @db.Uuid
+  date     DateTime @db.Date
+  reason   String?  @db.VarChar(255)
+
+  space ParkingSpace @relation(fields: [space_id], references: [id], onDelete: Cascade)
+
+  @@index([space_id, date])
+  @@map("space_blackout_dates")
+}
+
+model ParkingSlot {
+  id          String   @id @default(dbgenerated("uuid_generate_v4()")) @db.Uuid
+  space_id    String   @db.Uuid
+  slot_number String   @db.VarChar(20) // e.g. "A1", "B2", "Ground-01"
+  is_active   Boolean  @default(true)
+  notes       String?  @db.Text
+  created_at  DateTime @default(now()) @db.Timestamptz
+  updated_at  DateTime @updatedAt @db.Timestamptz
+
+  space         ParkingSpace @relation(fields: [space_id], references: [id], onDelete: Cascade)
+  bookings      Booking[]
+  booking_locks BookingLock[]
+
+  @@unique([space_id, slot_number])
+  @@index([space_id])
+  @@map("parking_slots")
+}
+
+model SpacePricingRule {
+  id                 String   @id @default(dbgenerated("uuid_generate_v4()")) @db.Uuid
+  space_id           String   @db.Uuid
+  rate_type          RateType
+  base_rate          Decimal  @db.Decimal(10, 2)
+  currency           String   @default("INR") @db.VarChar(3)
+  // peak_rules: [{start_time: "HH:mm", end_time: "HH:mm", multiplier: 1.5}]
+  peak_rules         Json?    @db.JsonB
+  weekend_multiplier Decimal? @db.Decimal(4, 2)
+  // discount_rules: {long_stay_hours, discount_pct, early_bird_hours, early_bird_discount}
+  discount_rules     Json?    @db.JsonB
+  min_price          Decimal? @db.Decimal(10, 2)
+  created_at         DateTime @default(now()) @db.Timestamptz
+  updated_at         DateTime @updatedAt @db.Timestamptz
+
+  space ParkingSpace @relation(fields: [space_id], references: [id], onDelete: Cascade)
+
+  @@unique([space_id, rate_type])
+  @@index([space_id])
+  @@map("space_pricing_rules")
+}
+
+// ─────────────────────────────────────────────
+// MODELS — Bookings
+// ─────────────────────────────────────────────
+
+model Booking {
+  id                  String        @id @default(dbgenerated("uuid_generate_v4()")) @db.Uuid
+  user_id             String        @db.Uuid
+  space_id            String        @db.Uuid
+  slot_id             String?       @db.Uuid
+  vehicle_id          String        @db.Uuid
+  start_time          DateTime      @db.Timestamptz
+  end_time            DateTime      @db.Timestamptz
+  status              BookingStatus @default(pending)
+  base_price          Decimal       @db.Decimal(10, 2)
+  platform_fee        Decimal       @db.Decimal(10, 2)
+  tax_amount          Decimal       @db.Decimal(10, 2)
+  discount_amount     Decimal       @default(0) @db.Decimal(10, 2)
+  total_price         Decimal       @db.Decimal(10, 2)
+  promo_code_id       String?       @db.Uuid
+  cancellation_reason String?       @db.Text
+  cancelled_by        CancelledBy?
+  cancelled_at        DateTime?     @db.Timestamptz
+  refund_amount       Decimal?      @db.Decimal(10, 2)
+  host_note           String?       @db.Text
+  created_at          DateTime      @default(now()) @db.Timestamptz
+  updated_at          DateTime      @updatedAt @db.Timestamptz
+
+  user         User          @relation(fields: [user_id], references: [id])
+  space        ParkingSpace  @relation(fields: [space_id], references: [id])
+  slot         ParkingSlot?  @relation(fields: [slot_id], references: [id])
+  vehicle      Vehicle       @relation(fields: [vehicle_id], references: [id])
+  promo_code   PromoCode?    @relation(fields: [promo_code_id], references: [id])
+  transactions Transaction[]
+  review       Review?
+  host_earning HostEarning?
+  dispute      Dispute?
+  tickets      SupportTicket[]
+
+  // DB-level overlap exclusion constraints applied via raw SQL migration:
+  // Per-slot (new):  EXCLUDE USING GIST (slot_id  WITH =, tstzrange(start_time, end_time) WITH &&) WHERE (status IN ('confirmed','active') AND slot_id  IS NOT NULL)
+  // Per-space (legacy fallback): EXCLUDE USING GIST (space_id WITH =, tstzrange(start_time, end_time) WITH &&) WHERE (status IN ('confirmed','active') AND slot_id IS NULL)
+
+  @@index([user_id])
+  @@index([space_id])
+  @@index([slot_id])
+  @@index([status])
+  @@index([start_time, end_time])
+  @@map("bookings")
+}
+
+model BookingLock {
+  id              String   @id @default(dbgenerated("uuid_generate_v4()")) @db.Uuid
+  space_id        String   @db.Uuid
+  slot_id         String?  @db.Uuid
+  start_time      DateTime @db.Timestamptz
+  end_time        DateTime @db.Timestamptz
+  locked_by       String   @db.Uuid
+  lock_expires_at DateTime @db.Timestamptz
+  created_at      DateTime @default(now()) @db.Timestamptz
+
+  space ParkingSpace  @relation(fields: [space_id], references: [id], onDelete: Cascade)
+  slot  ParkingSlot?  @relation(fields: [slot_id], references: [id])
+  user  User          @relation(fields: [locked_by], references: [id])
+
+  @@index([space_id])
+  @@index([slot_id])
+  @@index([lock_expires_at])
+  @@map("booking_locks")
+}
+
+// ─────────────────────────────────────────────
+// MODELS — Payments
+// ─────────────────────────────────────────────
+
+model Transaction {
+  id              String            @id @default(dbgenerated("uuid_generate_v4()")) @db.Uuid
+  booking_id      String            @db.Uuid
+  user_id         String            @db.Uuid
+  amount          Decimal           @db.Decimal(10, 2)
+  currency        String            @default("INR") @db.VarChar(3)
+  payment_method  PaymentMethod
+  status          TransactionStatus @default(pending)
+  gateway         PaymentGateway
+  gateway_ref     String?           @db.VarChar(255)
+  idempotency_key String            @unique @db.VarChar(255)
+  metadata        Json?             @db.JsonB
+  created_at      DateTime          @default(now()) @db.Timestamptz
+  updated_at      DateTime          @updatedAt @db.Timestamptz
+
+  booking Booking  @relation(fields: [booking_id], references: [id])
+  user    User     @relation(fields: [user_id], references: [id])
+  refunds Refund[]
+
+  @@index([booking_id])
+  @@index([user_id])
+  @@index([status])
+  @@index([idempotency_key])
+  @@map("transactions")
+}
+
+model Refund {
+  id                 String       @id @default(dbgenerated("uuid_generate_v4()")) @db.Uuid
+  transaction_id     String       @db.Uuid
+  amount             Decimal      @db.Decimal(10, 2)
+  reason             String?      @db.Text
+  status             RefundStatus @default(pending)
+  refund_to          RefundTo
+  gateway_refund_ref String?      @db.VarChar(255)
+  processed_at       DateTime?    @db.Timestamptz
+  created_at         DateTime     @default(now()) @db.Timestamptz
+
+  transaction Transaction @relation(fields: [transaction_id], references: [id])
+
+  @@index([transaction_id])
+  @@index([status])
+  @@map("refunds")
+}
+
+model SavedPaymentMethod {
+  id             String         @id @default(dbgenerated("uuid_generate_v4()")) @db.Uuid
+  user_id        String         @db.Uuid
+  gateway        PaymentGateway
+  token          String         @db.VarChar(255) // tokenized — never raw card data
+  card_last_four String?        @db.VarChar(4)
+  card_brand     String?        @db.VarChar(50)
+  is_default     Boolean        @default(false)
+  created_at     DateTime       @default(now()) @db.Timestamptz
+
+  user User @relation(fields: [user_id], references: [id], onDelete: Cascade)
+
+  @@index([user_id])
+  @@map("saved_payment_methods")
+}
+
+// ─────────────────────────────────────────────
+// MODELS — Wallet
+// ─────────────────────────────────────────────
+
+model Wallet {
+  id               String   @id @default(dbgenerated("uuid_generate_v4()")) @db.Uuid
+  user_id          String   @unique @db.Uuid
+  balance          Decimal  @default(0) @db.Decimal(10, 2)
+  reserved_balance Decimal  @default(0) @db.Decimal(10, 2)
+  currency         String   @default("INR") @db.VarChar(3)
+  updated_at       DateTime @updatedAt @db.Timestamptz
+
+  user         User               @relation(fields: [user_id], references: [id], onDelete: Cascade)
+  transactions WalletTransaction[]
+
+  // CHECK constraints applied via raw SQL: balance >= 0, reserved_balance >= 0
+  @@map("wallets")
+}
+
+model WalletTransaction {
+  id             String                @id @default(dbgenerated("uuid_generate_v4()")) @db.Uuid
+  wallet_id      String                @db.Uuid
+  type           WalletTransactionType
+  amount         Decimal               @db.Decimal(10, 2)
+  reference_type String?               @db.VarChar(50)
+  reference_id   String?               @db.Uuid
+  description    String?               @db.Text
+  balance_after  Decimal               @db.Decimal(10, 2)
+  created_at     DateTime              @default(now()) @db.Timestamptz
+
+  wallet Wallet @relation(fields: [wallet_id], references: [id], onDelete: Cascade)
+
+  @@index([wallet_id])
+  @@index([created_at])
+  @@map("wallet_transactions")
+}
+
+// ─────────────────────────────────────────────
+// MODELS — Notifications
+// ─────────────────────────────────────────────
+
+model Notification {
+  id         String   @id @default(dbgenerated("uuid_generate_v4()")) @db.Uuid
+  user_id    String   @db.Uuid
+  type       String   @db.VarChar(100)
+  title      String   @db.VarChar(255)
+  body       String   @db.Text
+  data       Json?    @db.JsonB
+  read       Boolean  @default(false)
+  created_at DateTime @default(now()) @db.Timestamptz
+
+  user User @relation(fields: [user_id], references: [id], onDelete: Cascade)
+
+  @@index([user_id, read])
+  @@index([created_at])
+  @@map("notifications")
+}
+
+model NotificationPreference {
+  id            String  @id @default(dbgenerated("uuid_generate_v4()")) @db.Uuid
+  user_id       String  @db.Uuid
+  event_type    String  @db.VarChar(100)
+  push_enabled  Boolean @default(true)
+  email_enabled Boolean @default(true)
+  sms_enabled   Boolean @default(false)
+
+  user User @relation(fields: [user_id], references: [id], onDelete: Cascade)
+
+  @@unique([user_id, event_type])
+  @@map("notification_preferences")
+}
+
+// ─────────────────────────────────────────────
+// MODELS — Reviews
+// ─────────────────────────────────────────────
+
+model Review {
+  id          String       @id @default(dbgenerated("uuid_generate_v4()")) @db.Uuid
+  booking_id  String       @unique @db.Uuid
+  reviewer_id String       @db.Uuid
+  reviewee_id String?      @db.Uuid
+  space_id    String?      @db.Uuid
+  rating      Int          // CHECK 1-5 via raw SQL constraint
+  body        String?      @db.Text
+  status      ReviewStatus @default(active)
+  created_at  DateTime     @default(now()) @db.Timestamptz
+  updated_at  DateTime     @updatedAt @db.Timestamptz
+
+  booking  Booking        @relation(fields: [booking_id], references: [id])
+  reviewer User           @relation("ReviewGiven", fields: [reviewer_id], references: [id])
+  reviewee User?          @relation("ReviewReceived", fields: [reviewee_id], references: [id])
+  space    ParkingSpace?  @relation(fields: [space_id], references: [id])
+  response ReviewResponse?
+
+  @@index([space_id])
+  @@index([reviewer_id])
+  @@index([status])
+  @@map("reviews")
+}
+
+model ReviewResponse {
+  id         String   @id @default(dbgenerated("uuid_generate_v4()")) @db.Uuid
+  review_id  String   @unique @db.Uuid
+  body       String   @db.Text
+  created_at DateTime @default(now()) @db.Timestamptz
+
+  review Review @relation(fields: [review_id], references: [id], onDelete: Cascade)
+
+  @@map("review_responses")
+}
+
+// ─────────────────────────────────────────────
+// MODELS — Promo Codes
+// ─────────────────────────────────────────────
+
+model PromoCode {
+  id                 String       @id @default(dbgenerated("uuid_generate_v4()")) @db.Uuid
+  code               String       @unique @db.VarChar(50)
+  discount_type      DiscountType
+  discount_value     Decimal      @db.Decimal(10, 2)
+  max_discount       Decimal?     @db.Decimal(10, 2)
+  min_booking_amount Decimal?     @db.Decimal(10, 2)
+  usage_limit        Int?
+  used_count         Int          @default(0)
+  valid_from         DateTime     @db.Timestamptz
+  valid_until        DateTime     @db.Timestamptz
+  active             Boolean      @default(true)
+  created_at         DateTime     @default(now()) @db.Timestamptz
+
+  bookings Booking[]
+
+  @@index([code])
+  @@index([active, valid_until])
+  @@map("promo_codes")
+}
+
+// ─────────────────────────────────────────────
+// MODELS — Host Earnings & Payouts
+// ─────────────────────────────────────────────
+
+model HostEarning {
+  id                String        @id @default(dbgenerated("uuid_generate_v4()")) @db.Uuid
+  host_id           String        @db.Uuid
+  booking_id        String        @unique @db.Uuid
+  payout_id         String?       @db.Uuid  // set when moved to on_hold; cleared on failure
+  gross_amount      Decimal       @db.Decimal(10, 2)
+  commission_amount Decimal       @db.Decimal(10, 2)
+  net_amount        Decimal       @db.Decimal(10, 2)
+  status            EarningStatus @default(pending)
+  available_at      DateTime?     @db.Timestamptz
+  created_at        DateTime      @default(now()) @db.Timestamptz
+
+  host    User    @relation(fields: [host_id], references: [id])
+  booking Booking @relation(fields: [booking_id], references: [id])
+  payout  Payout? @relation(fields: [payout_id], references: [id], onDelete: SetNull)
+
+  @@index([host_id])
+  @@index([status])
+  @@index([available_at])
+  @@index([payout_id])
+  @@map("host_earnings")
+}
+
+model Payout {
+  id                  String       @id @default(dbgenerated("uuid_generate_v4()")) @db.Uuid
+  host_id             String       @db.Uuid
+  amount              Decimal      @db.Decimal(10, 2)
+  bank_account_id     String       @db.Uuid
+  status              PayoutStatus @default(requested)
+  // Razorpay X fields
+  razorpay_payout_id  String?      @unique @db.VarChar(100) // e.g. "pout_xxx"
+  idempotency_key     String       @unique @db.VarChar(100) // prevents duplicate transfers
+  utr                 String?      @db.VarChar(100)         // bank UTR reference number
+  failure_reason      String?      @db.Text                 // set on failed/reversed events
+  processed_at        DateTime?    @db.Timestamptz
+  created_at          DateTime     @default(now()) @db.Timestamptz
+  updated_at          DateTime     @updatedAt @db.Timestamptz
+
+  host         User          @relation(fields: [host_id], references: [id])
+  bank_account BankAccount   @relation(fields: [bank_account_id], references: [id])
+  earnings     HostEarning[]
+
+  @@index([host_id])
+  @@index([status])
+  @@index([razorpay_payout_id])
+  @@map("payouts")
+}
+
+model BankAccount {
+  id                         String   @id @default(dbgenerated("uuid_generate_v4()")) @db.Uuid
+  host_id                    String   @db.Uuid
+  account_holder_name        String   @db.VarChar(200)
+  account_number_encrypted   String   @db.VarChar(500) // AES-256-GCM encrypted
+  ifsc_code                  String   @db.VarChar(20)
+  bank_name                  String   @db.VarChar(100)
+  is_default                 Boolean  @default(false)
+  is_verified                Boolean  @default(false)
+  verification_status        String   @default("pending") @db.VarChar(50)
+  verification_error         String?  @db.Text
+  // Razorpay X fields — populated after successful API registration
+  razorpay_contact_id        String?  @db.VarChar(100) // e.g. "cont_xxx"
+  razorpay_fund_account_id   String?  @db.VarChar(100) // e.g. "fa_xxx"
+  created_at                 DateTime @default(now()) @db.Timestamptz
+  updated_at                 DateTime @updatedAt @db.Timestamptz
+
+  host    User     @relation(fields: [host_id], references: [id], onDelete: Cascade)
+  payouts Payout[]
+
+  @@index([host_id])
+  @@map("bank_accounts")
+}
+
+// ─────────────────────────────────────────────
+// MODELS — Admin & System
+// ─────────────────────────────────────────────
+
+model AuditLog {
+  id          String   @id @default(dbgenerated("uuid_generate_v4()")) @db.Uuid
+  actor_id    String?  @db.Uuid
+  action      String   @db.VarChar(100)
+  entity_type String   @db.VarChar(100)
+  entity_id   String?  @db.Uuid
+  metadata    Json?    @db.JsonB
+  ip_address  String?  @db.VarChar(45)
+  created_at  DateTime @default(now()) @db.Timestamptz
+
+  actor User? @relation(fields: [actor_id], references: [id])
+
+  @@index([actor_id])
+  @@index([entity_type, entity_id])
+  @@index([created_at])
+  @@map("audit_logs")
+}
+
+model SupportTicket {
+  id          String         @id @default(dbgenerated("uuid_generate_v4()")) @db.Uuid
+  user_id     String         @db.Uuid
+  booking_id  String?        @db.Uuid
+  category    String         @db.VarChar(100)
+  subject     String         @db.VarChar(255)
+  description String         @db.Text
+  status      TicketStatus   @default(open)
+  priority    TicketPriority @default(medium)
+  assigned_to String?        @db.Uuid
+  created_at  DateTime       @default(now()) @db.Timestamptz
+  updated_at  DateTime       @updatedAt @db.Timestamptz
+
+  user     User     @relation("TicketSubmittedBy", fields: [user_id], references: [id])
+  assignee User?    @relation("TicketAssignedTo", fields: [assigned_to], references: [id])
+  booking  Booking? @relation(fields: [booking_id], references: [id])
+  dispute  Dispute?
+
+  @@index([user_id])
+  @@index([status])
+  @@index([priority])
+  @@map("support_tickets")
+}
+
+model Dispute {
+  id              String          @id @default(dbgenerated("uuid_generate_v4()")) @db.Uuid
+  ticket_id       String          @unique @db.Uuid
+  booking_id      String          @unique @db.Uuid
+  raised_by       String          @db.Uuid
+  reason          String          @db.Text
+  resolution      String?         @db.Text
+  resolution_type ResolutionType?
+  resolved_by     String?         @db.Uuid
+  resolved_at     DateTime?       @db.Timestamptz
+  created_at      DateTime        @default(now()) @db.Timestamptz
+
+  ticket   SupportTicket @relation(fields: [ticket_id], references: [id])
+  booking  Booking       @relation(fields: [booking_id], references: [id])
+  raiser   User          @relation("DisputeRaisedBy", fields: [raised_by], references: [id])
+  resolver User?         @relation("DisputeResolvedBy", fields: [resolved_by], references: [id])
+
+  @@index([raised_by])
+  @@map("disputes")
+}
+
+model PlatformConfig {
+  key        String   @id @db.VarChar(100)
+  value      Json     @db.JsonB
+  updated_at DateTime @updatedAt @db.Timestamptz
+
+  @@map("platform_config")
+}
+
+model Favorite {
+  id         String   @id @default(dbgenerated("uuid_generate_v4()")) @db.Uuid
+  user_id    String   @db.Uuid
+  space_id   String   @db.Uuid
+  created_at DateTime @default(now()) @db.Timestamptz
+
+  user  User         @relation(fields: [user_id], references: [id], onDelete: Cascade)
+  space ParkingSpace @relation(fields: [space_id], references: [id], onDelete: Cascade)
+
+  @@unique([user_id, space_id])
+  @@index([user_id])
+  @@map("favorites")
+}
