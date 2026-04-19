@@ -31,6 +31,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN groupadd -g 1001 nodejs && useradd -u 1001 -g nodejs justpark
 
 COPY package*.json ./
+# Dummy variable so Prisma generates the type-safe client without complaining about missing envs during Docker build in production stage
+ENV DATABASE_URL="postgresql://test:test@localhost:5432/test?schema=public"
 RUN npm ci --omit=dev && npm install pino-pretty
 
 COPY --from=builder /app/dist ./dist
