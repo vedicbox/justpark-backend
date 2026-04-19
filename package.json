@@ -7,7 +7,7 @@
     "dev": "ts-node-dev --respawn --transpile-only --exit-child src/server.ts",
     "build": "tsc --project tsconfig.json",
     "start": "node dist/server.js",
-    "migrate": "prisma migrate deploy",
+    "db:migrate": "prisma migrate deploy",
     "migrate:dev": "prisma migrate dev",
     "migrate:reset": "prisma migrate reset",
     "seed": "ts-node src/prisma/seed.ts",
